@@ -28,8 +28,9 @@ export class ConnPostgreSQL {
                 rejectUnauthorized: false
             } : false,
             max: 10,
-            idleTimeoutMillis: 15 * 60 * 1000,
-            connectionTimeoutMillis: 2000,
+            idleTimeoutMillis: 30000, 
+            connectionTimeoutMillis: 10000,
+            allowExitOnIdle: false,
         };
 
         this.pool = new Pool(config);
@@ -38,26 +39,46 @@ export class ConnPostgreSQL {
             console.error('Error inesperado en el pool de PostgreSQL:', err);
         });
 
+        this.pool.on('connect', () => {
+            console.log('Nueva conexión establecida al pool');
+        });
+
         this.testConnection();
     }
 
     private async testConnection(): Promise<void> {
         try {
-            await this.pool.query('SELECT NOW()');
+            const client = await this.pool.connect();
+            await client.query('SELECT NOW()');
+            client.release(); 
             console.log('Conexión a PostgreSQL exitosa.');
         } catch (error) {
             console.error('Error al verificar la conexión a la base de datos:', error);
-            throw error;
         }
     }
 
     async query(text: string, params?: any[]): Promise<QueryResult> {
-        try {
-            return await this.pool.query(text, params);
-        } catch (error) {
-            console.error('Error en query:', error);
-            throw error;
+        const maxRetries = 3;
+        let lastError;
+
+        for (let i = 0; i < maxRetries; i++) {
+            try {
+                return await this.pool.query(text, params);
+            } catch (error: any) {
+                lastError = error;
+                console.error(`Error en query (intento ${i + 1}/${maxRetries}):`, error.message);
+                
+                if (error.code === 'ECONNRESET' || error.code === 'PROTOCOL_CONNECTION_LOST' || error.code === '57P01') {
+                    if (i < maxRetries - 1) {
+                        await new Promise(resolve => setTimeout(resolve, 1000 * (i + 1)));
+                        continue;
+                    }
+                }
+                throw error;
+            }
         }
+        
+        throw lastError;
     }
 
     async getConnection() {
